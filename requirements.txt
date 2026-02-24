@@ -1,8 +1,8 @@
 streamlit
-yfinance
+yfinance>=0.2.40
 pandas
 numpy
 plotly
-feedparser
-beautifulsoup4
 requests
+beautifulsoup4
+feedparser
