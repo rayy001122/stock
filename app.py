@@ -11,11 +11,10 @@ import feedparser
 import json
 import os
 
-# --- 0. 檔案存取邏輯 (確保重新整理不遺失) ---
+# --- 0. 檔案存取邏輯 (確保新增股票永久保存) ---
 DB_FILE = "favorites.json"
 
 def load_favorites():
-    """從檔案讀取自選股，若無檔案則提供預設清單"""
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r", encoding="utf-8") as f:
@@ -31,11 +30,9 @@ def load_favorites():
     }
 
 def save_favorites(data):
-    """將目前的自選股清單永久存入檔案"""
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-# 初始化 Session State (僅在啟動時執行一次)
 if 'fav_stocks' not in st.session_state:
     st.session_state.fav_stocks = load_favorites()
 
@@ -43,34 +40,33 @@ if 'fav_stocks' not in st.session_state:
 st.set_page_config(page_title="台股全方位診斷系統", layout="wide")
 st.title("📈 台股專業投資工作站")
 
-# --- 2. 側邊欄：功能與參數 ---
+# --- 2. 側邊欄 ---
 st.sidebar.header("📊 分析參數")
 
-# 立即刷新按鈕
 if st.sidebar.button("🔄 立即重新整理數據"):
     st.cache_data.clear()
     st.rerun()
 
-# 股票選取與輸入
 st.sidebar.subheader("⭐ 自選股快捷鍵")
 label_to_ticker = {v: k for k, v in st.session_state.fav_stocks.items()}
 selected_label = st.sidebar.selectbox("選取我的自選股", ["-- 請選擇 --"] + list(st.session_state.fav_stocks.values()))
 
-default_ticker = label_to_ticker[selected_label] if selected_label != "-- 請選擇 --" else "2330.TW"
-ticker = st.sidebar.text_input("輸入台股代碼 (手動輸入)", default_ticker).upper()
+# 自動判定預設輸入
+initial_ticker = label_to_ticker[selected_label] if selected_label != "-- 請選擇 --" else "2330.TW"
+ticker_input = st.sidebar.text_input("輸入台股代碼 (例: 2317)", initial_ticker).upper()
 
-# 管理自選股
+# 修正代碼格式 (自動補上 .TW)
+ticker = ticker_input if "." in ticker_input else f"{ticker_input}.TW"
+
 with st.sidebar.expander("➕ 新增/管理自選股"):
-    new_ticker = st.text_input("新增代碼 (例: 2881.TW)").upper()
-    new_name = st.text_input("輸入名稱 (例: 富邦金)")
+    new_no = st.text_input("新增代碼 (如: 2881)").upper()
+    new_name = st.text_input("輸入名稱 (如: 富邦金)")
     if st.button("確認新增"):
-        if new_ticker and new_name:
-            st.session_state.fav_stocks[new_ticker] = f"{new_name} ({new_ticker.split('.')[0]})"
+        if new_no and new_name:
+            full_ticker = new_no if "." in new_no else f"{new_no}.TW"
+            st.session_state.fav_stocks[full_ticker] = f"{new_name} ({new_no})"
             save_favorites(st.session_state.fav_stocks)
-            st.success(f"已加入 {new_name}")
             st.rerun()
-        else:
-            st.error("請輸入完整代碼與名稱")
 
     st.divider()
     target_del = st.selectbox("刪除自選股", ["-- 請選擇 --"] + list(st.session_state.fav_stocks.values()))
@@ -83,8 +79,7 @@ with st.sidebar.expander("➕ 新增/管理自選股"):
                     st.rerun()
 
 st.sidebar.divider()
-time_frame = st.sidebar.selectbox("K線頻率", ["1d", "1wk", "1mo"], 
-                                 format_func=lambda x: {"1d":"每日", "1wk":"每週", "1mo":"每月"}[x])
+time_frame = st.sidebar.selectbox("K線頻率", ["1d", "1wk", "1mo"], format_func=lambda x: {"1d":"每日", "1wk":"每週", "1mo":"每月"}[x])
 period = st.sidebar.selectbox("資料回溯長度", ["1y", "2y", "5y", "max"], index=1)
 display_count = st.sidebar.slider("圖表顯示最近筆數", 20, 300, 80)
 
@@ -92,57 +87,48 @@ display_count = st.sidebar.slider("圖表顯示最近筆數", 20, 300, 80)
 
 @st.cache_data(ttl=600)
 def get_news(ticker_symbol):
-    """新聞抓取：RSS 優先 + Crawler 備援"""
     stock_no = ticker_symbol.split('.')[0]
-    query = urllib.parse.quote(f"{stock_no} 股市")
+    query = urllib.parse.quote(f"{stock_no} 股市 新聞")
     news_items = []
-    
-    # 方案 A: Google RSS
     try:
         url = f"https://news.google.com/rss/search?q={query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
-        feed = feedparser.parse(url)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=10)
+        feed = feedparser.parse(response.content)
         for entry in feed.entries[:8]:
             news_items.append({
-                'title': entry.title.split(' - ')[0],
+                'title': entry.title.rsplit(' - ', 1)[0],
                 'link': entry.link,
-                'source': entry.source.get('title', '財經媒體'),
-                'time': entry.published[:16]
+                'source': entry.source.get('title', '媒體'),
+                'time': entry.published[:16] if 'published' in entry else "近期"
             })
-        if news_items: return news_items
-    except: pass
-
-    # 方案 B: Crawler
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-    try:
-        resp = requests.get(f"https://www.google.com/search?q={query}&tbm=nws&hl=zh-TW&gl=TW", headers=headers, timeout=5)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for h in soup.find_all('div', role='heading')[:8]:
-            a = h.find_parent('a')
-            if a:
-                news_items.append({
-                    'title': h.text, 'link': a['href'], 'source': '即時新聞', 'time': '今日'
-                })
     except: pass
     return news_items
 
 @st.cache_data(ttl=300)
 def load_data(symbol, p, i):
-    """股價資料下載"""
     try:
         t_obj = yf.Ticker(symbol)
         data = t_obj.history(period=p, interval=i)
+        
+        # 備案：如果 .TW 沒資料，嘗試 .TWO (上櫃)
+        if data.empty and ".TW" in symbol:
+            symbol = symbol.replace(".TW", ".TWO")
+            t_obj = yf.Ticker(symbol)
+            data = t_obj.history(period=p, interval=i)
+            
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
         return data, t_obj.info
     except:
         return pd.DataFrame(), {}
 
-# --- 4. 資料處理與繪圖 ---
+# --- 4. 數據渲染 ---
 df, info = load_data(ticker, period, time_frame)
 
 if not df.empty:
     df = df.copy()
-    # 技術指標
+    # 技術指標計算
     df['MA5'] = df['Close'].rolling(window=5).mean()
     df['MA20'] = df['Close'].rolling(window=20).mean()
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
@@ -153,55 +139,60 @@ if not df.empty:
     df['Vol_MA5'] = df['Volume'].rolling(window=5).mean()
     
     plot_df = df.tail(display_count)
+    current_price = plot_df['Close'].iloc[-1]
 
-    # 基本面概況
-    st.subheader(f"🏢 {info.get('longName', ticker)} 基本面概況")
-    cols = st.columns(4)
-    cols[0].metric("本益比 (P/E)", f"{info.get('trailingPE', 'N/A')}")
-    cols[1].metric("股利殖利率", f"{info.get('dividendYield', 0)*100:.2f} %")
-    cols[2].metric("市值 (兆)", f"{info.get('marketCap', 0)/1e12:.2f}")
-    cols[3].metric("52週高/低", f"{info.get('fiftyTwoWeekHigh', 0)} / {info.get('fiftyTwoWeekLow', 0)}")
+    # --- 基本面與目標價 ---
+    st.subheader(f"🏢 {info.get('longName', ticker)} 基本面與估值概況")
+    
+    target_price = info.get('targetMeanPrice')
+    if target_price and target_price != 0:
+        upside = ((target_price - current_price) / current_price) * 100
+        upside_str = f"{upside:+.2f}%"
+    else:
+        target_price = "N/A"
+        upside_str = "N/A"
 
-    # Plotly 專業三層圖表
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("當前股價", f"{current_price:.2f}")
+    m2.metric("分析師平均目標價", f"{target_price}")
+    m3.metric("潛在漲跌空間", upside_str, delta=upside_str if upside_str != "N/A" else None)
+    m4.metric("本益比 (P/E)", f"{info.get('trailingPE', 'N/A')}")
+    m5.metric("股利殖利率", f"{info.get('dividendYield', 0)*100:.2f} %")
+    
+    st.caption(f"📌 **數據來源說明**：目標價為 Yahoo Finance 彙整之機構分析師共識值 (Analyst Consensus)；股價由 yfinance 實時提供。")
+
+    # --- 圖表區 ---
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.15, 0.35])
     
-    # 1. K線與均線
-    fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], 
-                                low=plot_df['Low'], close=plot_df['Close'], name="K線",
-                                increasing_line_color='#FF0000', decreasing_line_color='#00AA00'), row=1, col=1)
+    # K線
+    fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'], name="K線", increasing_line_color='#FF0000', decreasing_line_color='#00AA00'), row=1, col=1)
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA5'], name="MA5", line=dict(color='orange', width=1.5)), row=1, col=1)
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA20'], name="MA20", line=dict(color='blue', width=1.5)), row=1, col=1)
     
-    # 2. 成交量 (依漲跌變色)
+    # 成交量
     vol_colors = ['#FF0000' if plot_df['Close'].iloc[i] >= plot_df['Open'].iloc[i] else '#00AA00' for i in range(len(plot_df))]
-    fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['Volume'], name="成交量", marker_color=vol_colors, opacity=0.8), row=2, col=1)
+    fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['Volume'], name="成交量", marker_color=vol_colors), row=2, col=1)
     
-    # 3. MACD
+    # MACD
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MACD'], name="MACD", line=dict(color='black')), row=3, col=1)
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['SIGNAL'], name="Signal", line=dict(color='red')), row=3, col=1)
     hist_colors = ['#FF4B4B' if val >= 0 else '#008000' for val in plot_df['HIST']]
     fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['HIST'], name="MACD柱", marker_color=hist_colors), row=3, col=1)
 
-    fig.update_layout(height=800, xaxis_rangeslider_visible=False, template="plotly_white", margin=dict(t=10, b=10))
-    st.plotly_chart(fig, width='stretch')
+    fig.update_layout(height=700, xaxis_rangeslider_visible=False, template="plotly_white", margin=dict(t=10, b=10))
+    st.plotly_chart(fig, use_container_width=True)
 
     # 診斷區
     st.divider()
     st.subheader("🤖 價量與動能診斷建議")
     dc1, dc2 = st.columns(2)
-    c_close, p_close = plot_df['Close'].iloc[-1], plot_df['Close'].iloc[-2]
-    c_vol, c_vma5 = plot_df['Volume'].iloc[-1], plot_df['Vol_MA5'].iloc[-1]
-    
     with dc1:
-        if c_close > p_close and c_vol > c_vma5: st.success("✅ **量增價揚**：買盤積極，攻擊力道強。")
-        elif c_close < p_close and c_vol > c_vma5: st.error("🚨 **放量下跌**：賣壓沉重，注意回檔風險。")
-        else: st.info("😴 **縮量整理**：目前交投冷清，等待方向確立。")
-        
+        if current_price > plot_df['Close'].iloc[-2] and plot_df['Volume'].iloc[-1] > plot_df['Vol_MA5'].iloc[-1]: st.success("✅ **量增價揚**：買盤攻擊訊號。")
+        elif current_price < plot_df['Close'].iloc[-2] and plot_df['Volume'].iloc[-1] > plot_df['Vol_MA5'].iloc[-1]: st.error("🚨 **放量下跌**：賣壓沉重，避開弱勢股。")
+        else: st.info("😴 **縮量整理**：市場觀望中。")
     with dc2:
-        if plot_df['MACD'].iloc[-1] > plot_df['SIGNAL'].iloc[-1]:
-            st.success("🌟 **MACD 金叉**：短期動能偏多。")
-        else:
-            st.error("📉 **MACD 死叉**：短期動能轉弱。")
+        if plot_df['MACD'].iloc[-1] > plot_df['SIGNAL'].iloc[-1]: st.success("🌟 **MACD 金叉**：短期動能轉強。")
+        else: st.error("📉 **MACD 死叉**：短期動能轉弱。")
 
     # 新聞區
     st.divider()
@@ -209,10 +200,11 @@ if not df.empty:
     news_list = get_news(ticker)
     if news_list:
         for n in news_list:
-            with st.expander(f"📰 {n['title']}"):
-                st.write(f"**來源：** {n['source']} | **時間：** {n['time']}")
-                st.link_button("閱讀全文", n['link'])
+            with st.expander(f"📰 {n['title']} ({n['source']})"):
+                st.write(f"**時間：** {n['time']}")
+                st.link_button("閱讀原文", n['link'])
     else:
-        st.info("目前暫無即時新聞。")
+        st.info("暫無新聞。您可以點擊下方按鈕手動搜尋。")
+        st.link_button(f"🔍 Google 新聞搜尋: {ticker.split('.')[0]}", f"https://www.google.com/search?q={ticker.split('.')[0]}+股市+新聞&tbm=nws")
 else:
-    st.error("無法下載資料，請確認代碼（例如 2330.TW）。")
+    st.error(f"❌ 無法下載代碼 {ticker} 的資料。請確認代碼是否正確，或稍後再試。")
